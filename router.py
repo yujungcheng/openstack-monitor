@@ -10,7 +10,13 @@ conn = openstack.connect()
 
 
 def compare_dict_change(old, new):
-    return
+    diff = {}
+    keys = list(old.keys())
+    for k in keys:
+        if old[k] != new[k]:
+            diff[k] = {'old': old[k], 'new': new[k]}
+    return diff
+
 
 def main(interval=3600, log_dir='./log'):
 
@@ -29,6 +35,7 @@ def main(interval=3600, log_dir='./log'):
                 destination = route['destination']
                 nexthop = route['nexthop']
                 routes.append(f'{destination}->{nexthop}')
+            routes.sort()
 
             if r.external_gateway_info != None:
                 external_gateway_info = {
@@ -43,6 +50,7 @@ def main(interval=3600, log_dir='./log'):
             r_interfaces = conn.list_router_interfaces(r)
             for ri in r_interfaces:
                 router_interfaces.append(dict(ri))
+            router_interfaces = sorted(router_interfaces, key = lambda i: i['id'])
                 
             r_info = {
                 'created_at': r.created_at,
@@ -55,10 +63,16 @@ def main(interval=3600, log_dir='./log'):
             }
 
             # compare diff
-            diff = compare_dict_change(monitoring_routers[r.id], r_info)
-            monitoring_routers[r.id] = r_info
+            if r.id not in monitoring_routers:
+                log.info(f'monitoring router {r.id}: {r_info}')
+                diff = {}
+            else:
+                diff = compare_dict_change(monitoring_routers[r.id], r_info)
             
-            #print(f'{r_info}')
+            monitoring_routers[r.id] = r_info
+           
+            if diff != {}:
+                log.info(f'router {r.id} info changed: {diff}')
             
         time.sleep(interval)
 
