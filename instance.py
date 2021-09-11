@@ -13,11 +13,11 @@ from pathlib import Path
 
 conn = openstack.connect()
 log.basicConfig(format="%(asctime)s: %(message)s", level=log.INFO, datefmt="%Y-%m-%d %H:%M:%S")
-
+monitor_interval = 600
 
 class Monitor(threading.Thread):
     ''' Worker thread with return value '''
-    def __init__(self, func, result_queue, *args, wait=5, **kwargs):
+    def __init__(self, func, result_queue, *args, wait=monitor_interval, **kwargs):
         super().__init__()
         self.func = func
         self.args = args
@@ -44,6 +44,7 @@ class Monitor(threading.Thread):
 
 
 def servers(filters={}):
+    conn = openstack.connect()
     if 'host' in filters:
         return conn.compute.servers(details=True, all_projects=True, host=filters['host'])
     elif 'project' in filters:
@@ -61,15 +62,23 @@ def list_instances_by_filters(filters={}):
     for i in range(3):
         try:
             instances = servers(filters=filters)
+            if instances == None:
+                raise Exception("Unable to fetch instances")
             for s in instances:
                 network = {}
-                addresses = s.addresses
+                if s.addresses == None:
+                    addresses = []
+                else:
+                    addresses = s.addresses
                 for net_name, net_ips in addresses.items():
                     ips = {}
                     for ip in net_ips:
                         ips[ip['OS-EXT-IPS-MAC:mac_addr']] = ip['addr']
                     network[net_name] = ips
-                security_groups = [s['name'] for s in s.security_groups]
+                if s.security_groups == None:
+                    security_groups = []
+                else:
+                    security_groups = [s['name'] for s in s.security_groups]
                 log.debug(f'{s.id} {s.name} {s.vm_state} {s.task_state} {network} {security_groups}')
                 data.append({'id': s.id, 
                              'name': s.name, 
@@ -79,7 +88,8 @@ def list_instances_by_filters(filters={}):
                              'security_groups': security_groups})
             break
         except Exception as e:
-            log.error(f'list_instances_by_filters failed{i}: {e}')
+            log.error(f'list_instances_by_filters failed{i}, {filters}: {e}')
+            time.sleep(1)
     return data
 
 def list_instances_by_compute_node(host):
@@ -112,15 +122,15 @@ def process_result(result_queue, log_dir='./log'):
         checked_at = result['checked_at']
         data_count = len(result['data'])
         if 'host' in result:
-            log.info(f"Host: {result['host']} Count: {data_count}")
+            log.info(f"Host={result['host']} Count={data_count}")
             logfile = 'instances.by-host.log'
             head_line = f"{checked_at} {result['host']}"
         if 'project' in result:
-            log.info(f"Project: {result['project']} Count: {data_count}")
+            log.info(f"Project={result['project']} Count={data_count}")
             logfile = 'instances.by-project.log'
             head_line = f"{checked_at} {result['project']}"
         if 'uuid' in result:
-            log.info(f"UUID: {result['uuid']} Count: {data_count}")
+            log.info(f"UUID={result['uuid']} Count={data_count}")
             logfile = 'instances.by-uuid.log'
             head_line = f"{checked_at} {result['uuid']}"
         Path(log_dir).mkdir(parents=True, exist_ok=True)
@@ -157,6 +167,7 @@ def main(args):
                             m = Monitor(list_instances_by_compute_node, result_queue, s.host)
                             monitors[s.host] = m
                             m.start()
+                            time.sleep(1)
                 monitoring_hosts = list(monitors.keys())
                 for h in monitoring_hosts:
                     if h not in hosts:
@@ -168,7 +179,6 @@ def main(args):
                 project_ids = []
                 projects = conn.identity.projects()
                 for p in projects:
-                    #log.info(f'{p.name} {p.id}')
                     if p.name == 'service':  # skip service project
                         continue
                     if p.id not in project_ids:
@@ -178,6 +188,7 @@ def main(args):
                         m = Monitor(list_instances_by_project, result_queue, p.id)
                         monitors[p.id] = m
                         m.start()
+                        time.sleep(1)
                 monitoring_projects = list(monitors.keys())
                 for p in monitoring_projects:
                     if p not in project_ids:
@@ -198,7 +209,7 @@ def main(args):
                     log.info(f'No monitoring filters supplied')
                     break
                 
-            time.sleep(10)
+            time.sleep(monitor_interval)
     except Exception as e:
         log.error(f'Error: {e}')
     finally:
