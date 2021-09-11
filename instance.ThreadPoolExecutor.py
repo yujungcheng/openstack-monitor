@@ -9,45 +9,19 @@ import openstack
 import logging as log
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 
 conn = openstack.connect()
 log.basicConfig(format="%(asctime)s: %(message)s", level=log.INFO, datefmt="%Y-%m-%d %H:%M:%S")
 monitor_interval = 600
 
-class Monitor(threading.Thread):
-    ''' Worker thread with return value '''
-    def __init__(self, func, result_queue, *args, wait=monitor_interval, **kwargs):
-        super().__init__()
-        self.func = func
-        self.args = args
-        self.kwargs = kwargs
-        self.result = result_queue
-        self._stop = threading.Event()
-        self._wait = wait
-        self.running = False
-
-    def run(self):
-        self.running = True
-        while not self._stop.is_set():
-            try:
-                result = self.func(*self.args, **self.kwargs)
-                self.result.put(result)
-            except Exception as e:
-                log.error(f'Worker run failed: {e}')
-            self._stop.wait(self._wait)
-
-    def stop(self):
-        self.running = False
-        self._stop.set()
-        super().join(0)
-
 
 def servers(filters={}):
     if 'host' in filters:
         return conn.compute.servers(details=True, all_projects=True, host=filters['host'])
     elif 'project' in filters:
-        return conn.compute.servers(details=True, all_projects=True, project_id=filters['project'])        
+        return conn.compute.servers(details=True, all_projects=True, project_id=filters['project'])
     elif 'uuid' in filters:
         instances = []
         for uuid in filters['uuid']:
@@ -79,9 +53,9 @@ def list_instances_by_filters(filters={}):
                 else:
                     security_groups = [s['name'] for s in s.security_groups]
                 log.debug(f'{s.id} {s.name} {s.vm_state} {s.task_state} {network} {security_groups}')
-                data.append({'id': s.id, 
-                             'name': s.name, 
-                             'vm_state': s.vm_state, 
+                data.append({'id': s.id,
+                             'name': s.name,
+                             'vm_state': s.vm_state,
                              'task_state': s.task_state,
                              'network': network,
                              'security_groups': security_groups})
@@ -91,26 +65,37 @@ def list_instances_by_filters(filters={}):
             time.sleep(1)
     return data
 
-def list_instances_by_compute_node(host):
+def list_instances_by_compute_node(host, result_queue=None):
     result = {'host': host}
     result['data'] = list_instances_by_filters(filters={'host': host})
     now = datetime.now()
     result['checked_at'] = now.strftime("%Y-%m-%d %H:%M:%S")
-    return result
+    if result_queue != None:
+        result_queue.put(result)
+        return True
+    else:
+        return result
 
-def list_instances_by_project(project_id):    
+def list_instances_by_project(project_id, result_queue=None):
     result = {'project': project_id}
     result['data'] = list_instances_by_filters(filters={'project': project_id})
     now = datetime.now()
     result['checked_at'] = now.strftime("%Y-%m-%d %H:%M:%S")
-    return result
+    if result_queue != None:
+        result_queue.put(result)
+        return True
+    else:
+        return result
 
-def list_instances_by_uuid(uuid=[]):
+def list_instances_by_uuid(uuid=[], result_queue=None):
     result = {'uuid': uuid}
     result['data'] = list_instances_by_filters(filters={'uuid': uuid})
     now = datetime.now()
-    result['checked_at'] = now.strftime("%Y-%m-%d %H:%M:%S")
-    return result
+    if result_queue != None:
+        result_queue.put(result)
+        return True
+    else:
+        return result
 
 def process_result(result_queue, log_dir='./log'):
     region = conn._compute_region
@@ -142,7 +127,7 @@ def process_result(result_queue, log_dir='./log'):
                     line_items.append(f"{key}={value}")
                 line_string = f','.join(line_items)
                 f.write(f"{line_string}\n")
-            
+
 
 def main(args):
     result_queue = queue.Queue()
@@ -151,63 +136,58 @@ def main(args):
         # start result processing thread
         process_result_t = threading.Thread(target=process_result, args=(result_queue,))
         process_result_t.start()
-        
-        # start monitoring threads
+
         while True:
             if args['host']:  # by compute node
                 hosts = []
-                services = conn.compute.services()
+                services = conn.compute.services()  # get compute services
                 for s in services:
                     if s.binary == "nova-compute":
-                        if s.host not in hosts:
-                            hosts.append(s.host)      
+                        hosts.append(s.host)
                         if s.host not in monitors:
                             log.info(f'start compute node {s.host} monitoring')
-                            m = Monitor(list_instances_by_compute_node, result_queue, s.host)
-                            monitors[s.host] = m
-                            m.start()
-                            time.sleep(1)
+                            monitors[s.host] = True
+
+                with ThreadPoolExecutor(max_workers=4) as executor:  # limit to 4 works to avoid connection pull full
+                    for h in hosts:
+                        task = executor.submit(list_instances_by_compute_node, (h,), result_queue=result_queue)
+
                 monitoring_hosts = list(monitors.keys())
                 for h in monitoring_hosts:
                     if h not in hosts:
                         log.info(f'compute node {h} not exist, remove {h} monitoring.')
-                        monitors[h].stop()
                         del(monitors[h])
 
             elif args['project']:  # by project
                 project_ids = []
-                projects = conn.identity.projects()
+                projects = conn.identity.projects()  # work on keysotne v3 only
                 for p in projects:
-                    if p.name == 'service':  # skip service project
-                        continue
-                    if p.id not in project_ids:
-                        project_ids.append(p.id)
+                    project_ids.append(p.id)
                     if p.id not in monitors:
                         log.info(f'start project {p.name} ({p.id}) monitoring')
-                        m = Monitor(list_instances_by_project, result_queue, p.id)
-                        monitors[p.id] = m
-                        m.start()
-                        time.sleep(1)
-                monitoring_projects = list(monitors.keys())
-                for p in monitoring_projects:
-                    if p not in project_ids:
-                        log.info(f'project {p.name} not exist, remove {p.name} monitoring')
-                        monitors[p].stop()
-                        del(monitors[p])
+                        monitors[p.id] = True
 
-            else:  # by uuid, give a list of instance uuid
+                with ThreadPoolExecutor(max_workers=4) as executor:  # limit to 4 works to avoid connection pull full
+                    for p in project_ids:
+                        task = executor.submit(list_instances_by_project, (p,), result_queue=result_queue)
+
+                monitoring_hosts = list(monitors.keys())
+                for h in monitoring_hosts:
+                    if h not in project_ids:
+                        log.info(f'project {p.name} not exist, remove {p.name} monitoring')
+                        del(monitors[h])
+
+            else:  # by uuid
                 uuid = args['uuid']
-                if len(uuid) != 0: 
-                    print(f'{uuid}')
-                    log.info(f'start instance {uuid} monitoring')
+                if len(uuid) != 0:
                     if 'uuid' not in monitors:
-                        m = Monitor(list_instances_by_uuid, result_queue, uuid)
-                        monitors['uuid'] = m
-                        m.start()
+                        log.info(f'start instance {uuid} monitoring')
+                        monitors['uuid'] = uuid
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        task = executor.submit(list_instances_by_uuid, (uuid,), result_queue=result_queue)
                 else:
                     log.info(f'No monitoring filters supplied')
                     break
-                
             time.sleep(monitor_interval)
     except Exception as e:
         log.error(f'Error: {e}')
@@ -224,3 +204,4 @@ if __name__ == '__main__':
     parser.add_argument('uuid', nargs='*')
     args = vars(parser.parse_args(sys.argv[1:]))
     main(args)
+
