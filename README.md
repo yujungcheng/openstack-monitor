@@ -10,6 +10,8 @@ apt install python3-openstacksdk python3-pymysql
 - Reduce data amount (remove keys)
 - Save to MySql DB
 - Pack into Docker image
+- Configurable log directory
+
 
 
 ## License
