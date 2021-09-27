@@ -1,0 +1,27 @@
+--- # run openstack monitoring docker environment
+version: '3.3'
+services:
+  mysql:
+    container_name: monitor-db
+    image: mysql:5.7
+    restart: unless-stopped
+    volumes:
+      - /mnt/data:/var/lib/mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: ops-monitor
+      MYSQL_USER: monitor
+      MYSQL_PASSWORD: monitorpassword
+
+#  grafana:
+#    container_name: grafana
+#    image: grafana/grafana:8.0.0
+#    restart: unless-stopped
+#    
+#  prometheus:
+#    container_name: prometheus
+#    image: prom/prometheus:v2.28.1
+#    restart: unless-stopped
+
+
